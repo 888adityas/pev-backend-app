@@ -1,0 +1,161 @@
+name: Deployment
+on:
+  push:
+    branches:
+      - master
+      - staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: awsdeploy
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+    
+    - name: 🛠️ Determine Deployment Configuration
+      id: deployment-config
+      env:
+        REPO_NAME: ${{ github.event.repository.name }}
+        GITHUB_BRANCH: ${{ github.ref_name }}
+      run: |
+        # Determine application type
+        case "$REPO_NAME" in 
+          *"frontend-app")
+            echo "APP_TYPE=frontend" >> $GITHUB_OUTPUT
+            echo "✨ Detected Frontend Application"
+            ;;
+          *"backend-app")
+            echo "APP_TYPE=backend" >> $GITHUB_OUTPUT
+            echo "🖥️ Detected Backend Application"
+            ;;
+          *)
+            echo "❌ Unable to determine application type from repository name"
+            exit 1
+            ;;
+        esac
+
+        # Determine deployment target based on branch
+        case "$GITHUB_BRANCH" in
+          "master")
+            echo "TARGET_ENV=production" >> $GITHUB_OUTPUT
+            echo "TARGET_DIRECTORY=/home/ubuntu/projects/${{ github.event.repository.name }}/production" >> $GITHUB_OUTPUT
+            echo "WEBROOT_DIRECTORY=/var/www/html/${{ github.event.repository.name }}/production" >> $GITHUB_OUTPUT
+            echo "TARGET_INSTANCE=${{ secrets.PROD_EC2_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+            echo "CONTAINER_NAME=${{ github.event.repository.name }}-production" >> $GITHUB_OUTPUT
+            echo "🚀 Deployment Target: Production"
+            ;;
+          "staging")
+            echo "TARGET_ENV=staging" >> $GITHUB_OUTPUT
+            echo "TARGET_DIRECTORY=/home/ubuntu/projects/${{ github.event.repository.name }}/staging" >> $GITHUB_OUTPUT
+            echo "WEBROOT_DIRECTORY=/var/www/html/${{ github.event.repository.name }}/staging" >> $GITHUB_OUTPUT
+            echo "TARGET_INSTANCE=${{ secrets.STAGING_EC2_INSTANCE_ID || secrets.PROD_EC2_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+            echo "CONTAINER_NAME=${{ github.event.repository.name }}-staging" >> $GITHUB_OUTPUT
+            echo "🧪 Deployment Target: Staging"
+            ;;
+          *)
+            echo "❌ Unsupported branch: $GITHUB_BRANCH"
+            exit 1
+            ;;
+        esac
+    
+    - name: Configure AWS CLI
+      run: |
+        aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws configure set default.region ${{ secrets.AWS_DEFAULT_REGION }}
+    
+    - name: Clone Repository to Server
+      env:
+        TARGET_DIRECTORY: ${{ steps.deployment-config.outputs.TARGET_DIRECTORY }}
+        TARGET_INSTANCE: ${{ steps.deployment-config.outputs.TARGET_INSTANCE }}
+      run: |
+        # Execute AWS SSM command and capture output and error
+        aws ssm send-command \
+          --targets "Key=instanceIds,Values=$TARGET_INSTANCE" \
+          --document-name "AWS-RunShellScript" \
+          --comment "Cloning/Updating Repository" \
+          --parameters '{
+            "commands":[
+              "if [ ! -d '$TARGET_DIRECTORY' ]; then",
+              "  sudo -u ubuntu mkdir -p '$TARGET_DIRECTORY'",
+              "fi",
+              "cd '$TARGET_DIRECTORY'",
+              "if [ ! -d .git ]; then",
+              "  sudo -u ubuntu git init",
+              "  sudo -u ubuntu git remote add origin https://${{ secrets.TOKEN_GITHUB }}@github.com/${{ github.repository }}.git",
+              "  sudo -u ubuntu git fetch origin",
+              "  sudo -u ubuntu git checkout -b '$GITHUB_REF_NAME' --track origin/'$GITHUB_REF_NAME'",
+              "else",
+              "  sudo -u ubuntu git reset --hard origin/'$GITHUB_REF_NAME'",
+              "  sudo -u ubuntu git pull https://${{ secrets.TOKEN_GITHUB }}@github.com/${{ github.repository }}.git '$GITHUB_REF_NAME'",
+              "fi"
+            ]
+          }' \
+          --output text
+    
+    - name: Build and Deploy Frontend
+      if: steps.deployment-config.outputs.APP_TYPE == 'frontend'
+      env:
+        TARGET_DIRECTORY: ${{ steps.deployment-config.outputs.TARGET_DIRECTORY }}
+        WEBROOT_DIRECTORY: ${{ steps.deployment-config.outputs.WEBROOT_DIRECTORY }}
+        TARGET_INSTANCE: ${{ steps.deployment-config.outputs.TARGET_INSTANCE }}
+        TARGET_ENV: ${{ steps.deployment-config.outputs.TARGET_ENV }}
+      run: |
+        # Execute AWS SSM command and capture output and error
+        aws ssm send-command \
+          --targets "Key=instanceIds,Values=$TARGET_INSTANCE" \
+          --document-name "AWS-RunShellScript" \
+          --comment "Building Frontend for $TARGET_ENV" \
+          --parameters '{
+            "commands":[
+              "# Ensure project directory exists",
+              "sudo mkdir -p '$TARGET_DIRECTORY'",
+              
+              "# Ensure webroot directory exists with correct permissions",
+              "sudo mkdir -p '$WEBROOT_DIRECTORY'",
+              "sudo chown -R ubuntu:ubuntu '$WEBROOT_DIRECTORY'",
+              
+              "# Change to project directory",
+              "cd '$TARGET_DIRECTORY'",
+              
+              "# Install dependencies and build",
+              "sudo -u ubuntu npm ci",
+              "sudo -u ubuntu npm run build", 
+              
+              "# Copy built files to webroot",
+              "sudo rsync -avur --delete '$TARGET_DIRECTORY/dist/' '$WEBROOT_DIRECTORY'",
+              
+              "# Ensure correct permissions",
+              "sudo chown -R www-data:www-data '$WEBROOT_DIRECTORY'"
+            ]
+          }' \
+          --output text
+
+    - name: Deploy Backend
+      if: steps.deployment-config.outputs.APP_TYPE == 'backend'
+      env:
+        TARGET_DIRECTORY: ${{ steps.deployment-config.outputs.TARGET_DIRECTORY }}
+        TARGET_INSTANCE: ${{ steps.deployment-config.outputs.TARGET_INSTANCE }}
+        CONTAINER_NAME: ${{ steps.deployment-config.outputs.CONTAINER_NAME }}
+      run: |
+        # Execute AWS SSM command and capture output and error
+        aws ssm send-command \
+          --targets "Key=instanceIds,Values=$TARGET_INSTANCE" \
+          --document-name "AWS-RunShellScript" \
+          --comment "Deploying Backend to $CONTAINER_NAME" \
+          --parameters '{
+            "commands":[
+              "# Change to project directory",
+              "cd '$TARGET_DIRECTORY'",
+              
+              "# Install dependencies",
+              "sudo -u ubuntu npm ci",
+              
+              "# Restart Docker container",
+              "sudo docker container restart '$CONTAINER_NAME'"
+            ]
+          }' \
+          --output text

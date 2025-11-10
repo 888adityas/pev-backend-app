@@ -1,0 +1,14 @@
+# Local Configuration
+.vscode
+
+# Dependencies
+package-lock.json
+node_modules
+
+# Environment
+.env
+
+# Developer files and folders
+logs
+app-notes.txt
+
