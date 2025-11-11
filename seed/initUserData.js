@@ -1,8 +1,9 @@
 const mongoose = require("mongoose");
 const User = require("../src/models/User");
 
-const ActivityLog = require("../src/models/ActivityLog");
+const EmailVerificationSchema = require("../src/models/EmailVerificationSchema");
 const Helper = require("../src/utils/Helper");
+const axios = require("axios");
 
 /**
  * Initializes base records when a new user signs up
@@ -25,15 +26,42 @@ async function InitializeUserData(userId) {
 
     if (!user) throw new Error("User not found while seeding initial data.");
 
-    // 🧾 Create activity log
-    await ActivityLog.create({
-      user: user._id,
-      action: "user_registered",
-      summary: `Account created`,
-      createdAt: new Date(),
+    // fetch credits from bouncify
+
+    const URL = `${process.env.BASE_URL}/api/v1/email/credit-balance`;
+    const [err, response] = await Helper.to(
+      axios.get(URL, {
+        auth: {
+          username: user.api.apiKey,
+          password: user.api.secretKey,
+        },
+      })
+    );
+
+    if (err) {
+      return reject(Helper.formatAxiosError(err));
+    }
+
+    if (!response) {
+      throw "Faild to load credits from bouncify ";
+    }
+
+    console.log("Crd Res:", response);
+    const credits_purchased =
+      parseInt(response?.data?.credits_remaining) ?? 100;
+
+    // fetch remaining credits from bouncify
+
+    EmailVerifyPayload = new EmailVerificationSchema({
+      source: "credit purchased",
+      credits_purchased: 40,
+      user: userId, // logged in user id
+      summary: "Email Credits Allotted",
     });
 
-    console.log(`✅ User data initialized`);
+    await EmailVerifyPayload.save();
+
+    console.log(`User data initialized`);
     return true;
   } catch (error) {
     console.error("❌ Error initializing user data:", error);

@@ -2,15 +2,19 @@ const mongoose = require("mongoose");
 
 const emailVerificationSchema = new mongoose.Schema(
   {
-    name: { type: String, default: "unknown" },
-    email: { type: String, required: true },
-    result: { type: String, default: "unknown" },
-    source: { type: String, enum: ["single", "bulk"], default: "single" },
-    email_list: { type: mongoose.Schema.Types.ObjectId, ref: "EmailList" },
-    folder: { type: mongoose.Schema.Types.ObjectId, ref: "Folder" },
+    name: { type: String, default: null },
+    email: { type: String },
+    credits_used: { type: Number, default: 0 },
+    credits_purchased: { type: Number, default: null },
+    summary: { type: String },
+    result: { type: String, default: null },
+    source: {
+      type: String,
+      enum: ["single", "bulk", "credit purchased"],
+      default: "single",
+    },
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    bulk_verify_id: { type: String, default: null, index: true },
-    bouncify_Response: { type: mongoose.Schema.Types.Mixed },
+    data: { type: mongoose.Schema.Types.Mixed },
     deleted_at: { type: Date, default: null },
   },
   { timestamps: true }

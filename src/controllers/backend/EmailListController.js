@@ -29,32 +29,28 @@ const TeamMember = require("../../models/TeamMemberSchema");
 | `page`         | For pagination (which page number to show)                                   |
 | `limit`        | How many items per page                                                      |
 */
+
+// Note: Make this function in chunks, this is a very large function
 const getAllEmailLists = async (req, res, next) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.owner);
-    // const TeamMember = mongoose.model("TeamMember");
 
     // Get shared email lists
     const shared = await TeamMember.find({ member: owner }).populate(
       "email_lists"
     );
-
     const sharedListIds = shared?.flatMap((tm) =>
       tm.email_lists.map((el) => el._id)
     );
 
-    // Query params for filters, sorting, pagination
+    // Query params
     const {
-      status, // filter by status
-      search, // case-insensitive name search
-      min_verified, // verified_count >=
-      max_verified, // verified_count <=
-      min_total, // total_emails >=
-      max_total, // total_emails <=
-      sort_by = "createdAt", // allowed: name, status, createdAt, verified_count, total_emails, credit_consumed
-      sort_order, // asc|desc (default desc)
-      page, // 1-based
-      limit, // default 10 if not provided
+      status,
+      search,
+      sort_by = "createdAt",
+      sort_order,
+      page,
+      limit = 5,
       skip = 0,
     } = req.query || {};
 
@@ -62,26 +58,28 @@ const getAllEmailLists = async (req, res, next) => {
     const defaultLimit = 10;
     const perPage = Math.max(1, parseInt(limit, 10) || defaultLimit);
 
-    // Build match stage
-    const match = {
+    // Base match (used for both filtered data and global summary)
+    const baseMatch = {
       $and: [
         { deleted_at: null },
         {
-          $or: [
-            { user: owner }, // owned lists
-            { _id: { $in: sharedListIds } }, // shared lists
-          ],
+          $or: [{ user: owner }, { _id: { $in: sharedListIds } }],
         },
       ],
     };
-    if (status) match.status = String(status).toLowerCase();
-    if (search) match.name = { $regex: String(search), $options: "i" };
 
-    const toNum = (v) => (v === undefined ? undefined : Number(v));
-    const _minVerified = toNum(min_verified);
-    const _maxVerified = toNum(max_verified);
-    const _minTotal = toNum(min_total);
-    const _maxTotal = toNum(max_total);
+    // Create a filtered match (copy baseMatch safely)
+    const match = {
+      $and: [...baseMatch.$and],
+    };
+
+    if (status && status !== "all") {
+      match.$and.push({ status: String(status).toLowerCase() });
+    }
+
+    if (search) {
+      match.$and.push({ name: { $regex: String(search), $options: "i" } });
+    }
 
     const allowedSort = new Set([
       "name",
@@ -96,21 +94,11 @@ const getAllEmailLists = async (req, res, next) => {
       : "createdAt";
     const sortOrder = String(sort_order).toLowerCase() === "desc" ? -1 : 1;
 
+    // -------------------
+    // 1️⃣ Aggregation for filtered items (with pagination)
+    // -------------------
     const pipeline = [];
     pipeline.push({ $match: match });
-
-    const rangeExprs = [];
-    if (Number.isFinite(_minVerified))
-      rangeExprs.push({ $gte: ["$verified_count", _minVerified] });
-    if (Number.isFinite(_maxVerified))
-      rangeExprs.push({ $lte: ["$verified_count", _maxVerified] });
-    if (Number.isFinite(_minTotal))
-      rangeExprs.push({ $gte: ["$total_emails", _minTotal] });
-    if (Number.isFinite(_maxTotal))
-      rangeExprs.push({ $lte: ["$total_emails", _maxTotal] });
-    if (rangeExprs.length)
-      pipeline.push({ $match: { $expr: { $and: rangeExprs } } });
-
     pipeline.push({ $sort: { [sortKey]: sortOrder, _id: -1 } });
 
     pipeline.push({
@@ -124,6 +112,58 @@ const getAllEmailLists = async (req, res, next) => {
     const items = agg?.[0]?.items || [];
     const total_count = agg?.[0]?.totalCount?.[0]?.count || 0;
 
+    // -------------------
+    // 2️⃣ Separate aggregation for global status summary (unfiltered)
+    // -------------------
+    const statusAgg = await EmailList.aggregate([
+      { $match: baseMatch },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          status: "$_id",
+          count: 1,
+        },
+      },
+    ]);
+
+    const expectedStatuses = [
+      { value: "verified", label: "Verified" },
+      { value: "processing", label: "Processing" },
+      { value: "uploading", label: "Uploading" },
+      { value: "unverified", label: "Unverified" },
+    ];
+
+    const statusMap = expectedStatuses.reduce((acc, s) => {
+      acc[s.value] = 0;
+      return acc;
+    }, {});
+
+    (statusAgg || []).forEach(({ status, count }) => {
+      if (statusMap.hasOwnProperty(status)) {
+        statusMap[status] = count;
+      }
+    });
+
+    const allCount = Object.values(statusMap).reduce((a, b) => a + b, 0);
+
+    const status_summary = [
+      { value: "all", label: "All", count: allCount },
+      ...expectedStatuses.map((s) => ({
+        value: s.value,
+        label: s.label,
+        count: statusMap[s.value],
+      })),
+    ];
+
+    // -------------------
+    // Response payload
+    // -------------------
     const payload = {
       items,
       pagination: {
@@ -134,17 +174,10 @@ const getAllEmailLists = async (req, res, next) => {
         sort_by: sortKey,
         sort_order: sortOrder === 1 ? "asc" : "desc",
       },
-      filters: {
-        status: status || null,
-        search: search || null,
-        min_verified: _minVerified ?? null,
-        max_verified: _maxVerified ?? null,
-        min_total: _minTotal ?? null,
-        max_total: _maxTotal ?? null,
-      },
+      status_summary, // ✅ global counts unaffected by filters
     };
 
-    Logs.info("✅Fetched email lists via aggregation");
+    Logs.info("Fetched email lists via aggregation");
     return res
       .status(200)
       .json(Response.success("Email lists fetched", payload));
@@ -154,8 +187,6 @@ const getAllEmailLists = async (req, res, next) => {
   }
 };
 
-// Get all email lists extract only _id and name of the email list
-// this data we'll need for select dropdown
 const getAllEmailListsIds = async (req, res, next) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.owner);
@@ -163,7 +194,7 @@ const getAllEmailListsIds = async (req, res, next) => {
       { user: owner, deleted_at: null, status: { $ne: "verified" } },
       { name: 1, status: 1 }
     );
-    Logs.info("✅Fetched email lists");
+    Logs.info("Fetched email lists");
     return res
       .status(200)
       .json(Response.success("Email lists fetched", emailLists));
@@ -224,7 +255,7 @@ const shareEmailList = async (req, res, next) => {
 
     Logs.debug("teamMember:", teamMember);
 
-    Logs.info("✅Email list shared successfully");
+    Logs.info("Email list shared successfully");
     return res
       .status(200)
       .json(Response.success("Email list shared successfully", teamMember));
@@ -369,7 +400,7 @@ const getEmailListCardStats = async (req, res, next) => {
       },
     ]);
 
-    Logs.info("✅Email list card stats fetched successfully");
+    Logs.info("Email list card stats fetched successfully");
     return res
       .status(200)
       .json(

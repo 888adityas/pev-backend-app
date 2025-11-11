@@ -10,8 +10,7 @@ const userSchema = new mongoose.Schema(
 
     user_id: { type: String, required: true, unique: true },
     role: { type: String, enum: ["owner", "team_member"], default: "owner" },
-    // Only folder ownership and relationships are tracked
-    folders: [{ type: mongoose.Schema.Types.ObjectId, ref: "Folder" }],
+
     api: { type: mongoose.Schema.Types.Mixed, required: true },
     timezone: { type: String, default: "Asia/Kolkata" },
   },

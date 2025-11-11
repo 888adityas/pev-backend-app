@@ -6,6 +6,7 @@ const Response = require("../utils/Response");
 const ActivityLog = require("../models/ActivityLog");
 const passport = require("passport");
 const Logs = require("../utils/Logs");
+const { default: mongoose } = require("mongoose");
 
 module.exports = async (req, res, next) => {
   passport.authenticate(
@@ -30,6 +31,19 @@ module.exports = async (req, res, next) => {
           if (eventData && eventData.password) {
             delete eventData.password;
           }
+
+          const newActivityLog = new ActivityLog({
+            user_id: new mongoose.Types.ObjectId(req.user.id),
+            module_name:
+              req.routeOptions && req.routeOptions.module_name
+                ? req.routeOptions.module_name
+                : "",
+            event_source: "api",
+            action: req.method,
+            url: req.originalUrl,
+            data: JSON.stringify(eventData),
+          });
+          await newActivityLog.save();
         }
 
         req.user = user;

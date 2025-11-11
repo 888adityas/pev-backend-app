@@ -101,7 +101,8 @@ module.exports = {
       }
 
       // If validation passes, you can access validated data in req.body
-      const { first_name, last_name, email, password } = req.body;
+      const { first_name, last_name, password } = req.body;
+      const email = req.body.email?.toLowerCase();
 
       //Call signup api
       var [err, signUp] = await Helper.to(
@@ -113,6 +114,9 @@ module.exports = {
           project: process.env.PROJECT_NAME,
         })
       );
+
+      // signUp.status === "success"
+      // User is created in Accounts
 
       if (err) {
         throw err;
@@ -130,7 +134,10 @@ module.exports = {
         })
       );
 
+      Logs.info("signIn Response: ", signIn);
+
       if (err) {
+        Logs.error("signIn err: ", signIn);
         throw err;
       }
 
@@ -151,8 +158,10 @@ module.exports = {
         User.signUp(user.id, first_name, last_name, email)
       );
 
-      // Initialize all base collections
-      await InitializeUserData(newUser._id);
+      if (newUser) {
+        // Initialize all base collections
+        await InitializeUserData(newUser._id);
+      }
 
       req.logIn(user, function (err) {
         if (err) {

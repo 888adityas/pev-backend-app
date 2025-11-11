@@ -3,8 +3,9 @@
  */
 
 const Response = require("../utils/Response");
-// const ActivityLog = require("../models/ActivityLog");
+const ActivityLog = require("../models/ActivityLog");
 const Logs = require("../utils/Logs");
+const { default: mongoose } = require("mongoose");
 
 module.exports = async (req, res, next) => {
   if (!req.isAuthenticated()) {
@@ -28,20 +29,20 @@ module.exports = async (req, res, next) => {
       delete eventData.password;
     }
 
-    // const newActivityLog = new ActivityLog({
-    //   user_id: req.user.id,
-    //   module_name:
-    //     req.routeOptions && req.routeOptions.module_name
-    //       ? req.routeOptions.module_name
-    //       : "",
-    //   event_source: "user",
-    //   action: req.method,
-    //   url: req.originalUrl,
-    //   data: JSON.stringify(eventData),
-    // });
+    const newActivityLog = new ActivityLog({
+      user_id: new mongoose.Types.ObjectId(req.user.id),
+      module_name:
+        req.routeOptions && req.routeOptions.module_name
+          ? req.routeOptions.module_name
+          : "",
+      event_source: "user",
+      action: req.method,
+      url: req.originalUrl,
+      data: JSON.stringify(eventData),
+    });
 
-    // // Save the logs to the database
-    // await newActivityLog.save();
+    // Save the logs to the database
+    await newActivityLog.save();
   }
 
   return next(); // User is authenticated, continue to the next middleware or route handler

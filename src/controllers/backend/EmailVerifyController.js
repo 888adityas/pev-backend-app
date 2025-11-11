@@ -76,25 +76,16 @@ const singleVerifyEmail = async (req, res, next) => {
     let EmailVerifyPayload;
     if (response?.data) {
       EmailVerifyPayload = new EmailVerificationSchema({
-        name: "unknown",
         email: response.data.email,
+        credits_used: 1,
         result: response.data.result,
+        summary: "Email Address",
         source: "single",
         user: owner, // logged in user id
-        bouncify_response: response?.data,
+        data: response?.data,
       });
 
       await EmailVerifyPayload.save();
-
-      // Create activity log
-      const newActivityLog = new ActivityLog({
-        user: owner,
-        action: "single_verification",
-        summary: "Single Email Verified!",
-        credits_used: 1,
-        data: JSON.stringify(req.body),
-      });
-      await newActivityLog.save();
     }
 
     return res
@@ -277,17 +268,17 @@ const startBulkVerification = async (req, res, next) => {
       emailList.status = "processing";
       emailList.credit_consumed = emailList.total_emails;
       await emailList.save();
-
-      // Create activity log
-      const newActivityLog = new ActivityLog({
-        user: owner,
-        action: "bulk_start",
-        summary: "Bulk list verification started",
-        credits_used: emailList.credit_consumed,
-        data: JSON.stringify(req.body),
-      });
-      await newActivityLog.save();
     }
+
+    EmailVerifyPayload = new EmailVerificationSchema({
+      credits_used: emailList.credit_consumed,
+      source: "bulk",
+      summary: "Bulk verification started",
+      user: owner, // logged in user id
+      data: JSON.stringify(req.body),
+    });
+
+    await EmailVerifyPayload.save();
 
     Logs.info("✅Bulk verification started");
     return res.status(200).json(
@@ -435,16 +426,6 @@ const downloadBulkResult = async (req, res, next) => {
     );
     res.setHeader("Content-Type", "text/csv");
 
-    // Create activity log
-    const newActivityLog = new ActivityLog({
-      user: owner,
-      action: "bulk_result_downloaded",
-      summary: "Bulk list verification result downloaded",
-      credits_used: 0,
-      data: null,
-    });
-    await newActivityLog.save();
-
     return res.status(200).send(Buffer.from(response.data));
   } catch (error) {
     if (error.response) {
@@ -516,16 +497,6 @@ const deleteBulkList = async (req, res, next) => {
       await emailList.save();
     }
 
-    // Create activity log
-    const newActivityLog = new ActivityLog({
-      user: owner,
-      action: "bulk_list_deleted",
-      summary: "Bulk list deleted",
-      credits_used: 0,
-      data: { bulk_verify_id: resolvedJobId },
-    });
-    await newActivityLog.save();
-
     Logs.info("✅Bulk list deleted");
     return res.status(200).json(
       Response.success("Bulk list deleted", {
@@ -547,6 +518,68 @@ const deleteBulkList = async (req, res, next) => {
 };
 
 // Get Bouncify credit balance
+// const getBouncifyCredits = async (req, res, next) => {
+//   try {
+//     const apiKey = process.env.BOUNCIFY_API_KEY;
+//     const infoEndpoint =
+//       process.env.BOUNCIFY_INFO_ENDPOINT || "https://api.bouncify.io/v1/info";
+//     const url = `${infoEndpoint}?apikey=${apiKey}`;
+
+//     // 1) Fetch remaining credits from Bouncify
+//     const response = await axios.get(url, {
+//       headers: { Accept: "application/json" },
+//     });
+//     const data = response?.data || {};
+//     const creditsRemaining = data?.credits_info?.credits_remaining ?? null;
+
+//     // 2) Compute consumed credits for this owner
+//     const owner = new mongoose.Types.ObjectId(req.owner);
+
+//     // 2.a) Count single verifications (each costs 1 credit)
+//     const singleCount = await EmailVerificationSchema.countDocuments({
+//       user: owner,
+//     });
+
+//     // 2.b) Sum bulk list credit_consumed and count total lists
+//     const listAgg = await EmailList.aggregate([
+//       { $match: { user: owner } },
+//       {
+//         $group: {
+//           _id: null,
+//           total_credit_consumed: { $sum: { $ifNull: ["$credit_consumed", 0] } },
+//           total_lists: { $sum: 1 },
+//         },
+//       },
+//     ]);
+
+//     const creditsFromLists = listAgg[0]?.total_credit_consumed || 0;
+//     const totalLists = listAgg[0]?.total_lists || 0;
+
+//     const creditsConsumed = singleCount + creditsFromLists;
+
+//     const normalized = {
+//       success: data.success ?? true,
+//       credits_remaining: creditsRemaining,
+//       credits_consumed: creditsConsumed,
+//       total_count_of_email_lists: totalLists,
+//     };
+
+//     return res
+//       .status(200)
+//       .json(Response.success("Bouncify credit balance fetched", normalized));
+//   } catch (error) {
+//     if (error.response) {
+//       Logs.error(
+//         "Bouncify Error:",
+//         error.response.data || error.response.statusText
+//       );
+//     } else {
+//       Logs.error("Network/Error:", error.message);
+//     }
+//     next(error);
+//   }
+// };
+
 const getBouncifyCredits = async (req, res, next) => {
   try {
     const apiKey = process.env.BOUNCIFY_API_KEY;
@@ -554,58 +587,76 @@ const getBouncifyCredits = async (req, res, next) => {
       process.env.BOUNCIFY_INFO_ENDPOINT || "https://api.bouncify.io/v1/info";
     const url = `${infoEndpoint}?apikey=${apiKey}`;
 
-    // 1) Fetch remaining credits from Bouncify
+    // --------------------------------------------
+    // 1️⃣ Fetch remaining credits from Bouncify API
+    // --------------------------------------------
     const response = await axios.get(url, {
       headers: { Accept: "application/json" },
     });
-    const data = response?.data || {};
-    const creditsRemaining = data?.credits_info?.credits_remaining ?? null;
 
-    // 2) Compute consumed credits for this owner
+    const data = response?.data || {};
+    const creditsRemaining = data?.credits_info?.credits_remaining ?? 0;
+
+    // --------------------------------------------
+    // 2️⃣ Compute consumed & purchased credits locally
+    // --------------------------------------------
     const owner = new mongoose.Types.ObjectId(req.owner);
 
-    // 2.a) Count single verifications (each costs 1 credit)
-    const singleCount = await EmailVerificationSchema.countDocuments({
-      user: owner,
-    });
-
-    // 2.b) Sum bulk list credit_consumed and count total lists
-    const listAgg = await EmailList.aggregate([
-      { $match: { user: owner } },
+    // Aggregate total credits used & purchased (from EmailVerificationSchema)
+    const creditAgg = await EmailVerificationSchema.aggregate([
+      { $match: { user: owner, deleted_at: null } },
       {
         $group: {
           _id: null,
-          total_credit_consumed: { $sum: { $ifNull: ["$credit_consumed", 0] } },
-          total_lists: { $sum: 1 },
+          total_credits_used: { $sum: { $ifNull: ["$credits_used", 0] } },
+          total_credits_purchased: {
+            $sum: { $ifNull: ["$credits_purchased", 0] },
+          },
         },
       },
     ]);
 
-    const creditsFromLists = listAgg[0]?.total_credit_consumed || 0;
-    const totalLists = listAgg[0]?.total_lists || 0;
+    const creditsUsed = creditAgg?.[0]?.total_credits_used || 0;
+    const creditsPurchased = creditAgg?.[0]?.total_credits_purchased || 0;
 
-    const creditsConsumed = singleCount + creditsFromLists;
+    // --------------------------------------------
+    // 3️⃣ Get total number of email lists (from EmailList)
+    // --------------------------------------------
+    const totalEmailLists = await EmailList.countDocuments({
+      user: owner,
+      deleted_at: null,
+    });
 
+    // --------------------------------------------
+    // 4️⃣ Normalize for frontend response
+    // --------------------------------------------
     const normalized = {
       success: data.success ?? true,
       credits_remaining: creditsRemaining,
-      credits_consumed: creditsConsumed,
-      total_count_of_email_lists: totalLists,
+      credits_consumed: creditsUsed, // ✅ from EmailVerificationSchema only
+      credits_purchased: creditsPurchased,
+      total_count_of_email_lists: totalEmailLists,
     };
+
+    Logs.info("✅ Bouncify credit balance fetched successfully");
 
     return res
       .status(200)
       .json(Response.success("Bouncify credit balance fetched", normalized));
   } catch (error) {
+    // --------------------------------------------
+    // 5️⃣ Error handling
+    // --------------------------------------------
     if (error.response) {
       Logs.error(
-        "Bouncify Error:",
+        "❌ Bouncify API Error:",
         error.response.data || error.response.statusText
       );
     } else {
-      Logs.error("Network/Error:", error.message);
+      Logs.error("❌ Network/Error:", error.message);
     }
-    next(error);
+
+    return next(error);
   }
 };
 
